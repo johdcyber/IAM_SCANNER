@@ -1,8 +1,11 @@
+import argparse
 import boto3
 import json
 import logging
 import csv
 from datetime import datetime
+from fnmatch import fnmatch
+from botocore.exceptions import ClientError
 
 # Configure logging
 logging.basicConfig(
@@ -62,13 +65,18 @@ pacu_iam_actions = [
     "iam:DetachRolePolicy", "iam:PassRole"
 ]
 
-# Define common read-only actions
-read_only_actions = [
+# Define common read-only action patterns
+READ_ONLY_PATTERNS = [
     "s3:Get*", "s3:List*",
     "ec2:Describe*", "rds:Describe*",
     "cloudwatch:Get*", "cloudwatch:List*",
     "iam:Get*", "iam:List*"
 ]
+
+
+def is_read_only(action: str) -> bool:
+    """Return True if the action matches a read-only pattern."""
+    return any(fnmatch(action, pattern) for pattern in READ_ONLY_PATTERNS)
 
 
 def get_all_policies():
@@ -107,7 +115,8 @@ def categorize_risk(actions, resources):
     risk_level = 'Low'
     mitre_techniques = set()
 
-    if '*' in actions and '*' in resources:
+    if (any(action == '*' or action.endswith(':*') for action in actions)
+            and any(res == '*' for res in resources)):
         return 'High', {"T1078"}
 
     for action in actions:
@@ -123,7 +132,7 @@ def categorize_risk(actions, resources):
                 risk_level = 'Medium'
                 mitre_techniques.add(high_risk_actions.get(action, "T1106"))
 
-    if all(action in read_only_actions for action in actions):
+    if all(is_read_only(action) for action in actions):
         risk_level = 'Low'
 
     return risk_level, mitre_techniques
@@ -145,8 +154,8 @@ def find_overly_permissive_details(policy_document):
                     actions = [actions]
                 if isinstance(resources, str):
                     resources = [resources]
-                # Exclude common read-only actions
-                actions = [action for action in actions if action not in read_only_actions]
+                # Exclude common read-only actions using pattern matching
+                actions = [action for action in actions if not is_read_only(action)]
                 if not actions:
                     continue
                 risk_level, mitre_techniques = categorize_risk(actions, resources)
@@ -175,6 +184,32 @@ def get_roles_with_policy(policy_arn):
     except Exception as e:
         logging.error(f"Failed to get roles for policy {policy_arn}: {e}")
     return roles
+
+
+def get_all_roles():
+    """Retrieve all IAM roles."""
+    roles = []
+    try:
+        paginator = iam_client.get_paginator('list_roles')
+        for response in paginator.paginate():
+            roles.extend(response['Roles'])
+    except ClientError as e:
+        logging.error(f"Failed to list roles: {e}")
+    return roles
+
+
+def get_inline_role_policies(role_name):
+    """Return inline policy documents for a role."""
+    policies = []
+    try:
+        paginator = iam_client.get_paginator('list_role_policies')
+        for response in paginator.paginate(RoleName=role_name):
+            for policy_name in response['PolicyNames']:
+                policy = iam_client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
+                policies.append((policy_name, policy['PolicyDocument']))
+    except ClientError as e:
+        logging.error(f"Failed to get inline policies for role {role_name}: {e}")
+    return policies
 
 
 def describe_policy_access(actions):
@@ -260,14 +295,23 @@ def main():
     """
     Main function to detect overly permissive IAM policies and their associated roles.
     """
+    parser = argparse.ArgumentParser(description="Johndcyber IAM Resource Scanner")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     logging.info("Starting Johndcyber IAM Resource Scanner...")
 
     policies = get_all_policies()
+    logging.info(f"Scanning {len(policies)} managed policies")
     overly_permissive_policies = []
 
     for policy in policies:
         policy_arn = policy['Arn']
         policy_name = policy['PolicyName']
+        logging.debug(f"Analyzing policy {policy_name} ({policy_arn})")
         policy_document = get_policy_document(policy_arn)
         if policy_document:
             permissive_details = find_overly_permissive_details(policy_document)
@@ -276,6 +320,20 @@ def main():
                 role_names = [role['RoleName'] for role in roles]
                 access_type = describe_policy_access(detail["Actions"])
                 overly_permissive_policies.append((role_names, policy_name, detail["Actions"], detail["Resources"],
+                                                   access_type, detail["Risk"], detail["MITRE Techniques"]))
+
+    # Scan inline role policies
+    roles = get_all_roles()
+    logging.info(f"Scanning inline policies for {len(roles)} roles")
+    for role in roles:
+        role_name = role['RoleName']
+        logging.debug(f"Checking inline policies for role {role_name}")
+        inline_policies = get_inline_role_policies(role_name)
+        for policy_name, document in inline_policies:
+            permissive_details = find_overly_permissive_details(document)
+            for detail in permissive_details:
+                access_type = describe_policy_access(detail["Actions"])
+                overly_permissive_policies.append(([role_name], policy_name, detail["Actions"], detail["Resources"],
                                                    access_type, detail["Risk"], detail["MITRE Techniques"]))
 
     if overly_permissive_policies:
