@@ -6,6 +6,7 @@ The Johndcyber IAM Resource Scanner is a Python script designed to detect overly
 ## Features
 
 - Scans all IAM policies in your AWS account.
+- Scans both managed and inline IAM role policies.
 - Identifies overly permissive policies (e.g., policies with `*` actions or resources).
 - Lists roles attached to the identified policies.
 - Describes the type of access (read or write) granted by the policies.
@@ -34,10 +35,10 @@ The Johndcyber IAM Resource Scanner is a Python script designed to detect overly
 
 2. Run the script using Python:
     \`\`\`bash
-    python johndcyber_iam_scanner.py
+    python johndcyber_iam_scanner.py [--debug]
     \`\`\`
 
-3. The script will log its progress and any errors encountered to both the console and a log file named `johndcyber_iam_scanner.log`.
+3. The script will log its progress and any errors encountered to both the console and a log file named `johndcyber_iam_scanner.log`. Use the `--debug` flag for verbose output.
 
 4. The results will be written to a CSV file named `overly_permissive_policies.csv` with the following columns:
     - `Resource`: Roles attached to the overly permissive policy.
